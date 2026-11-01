@@ -94,7 +94,7 @@ const COMMANDS = {
   rmbg: 'rmbg', removebg: 'rmbg', bg: 'rmbg', 'ازالة': 'rmbg', 'إزالة': 'rmbg', 'خلفية': 'rmbg', 'ازالة_الخلفية': 'rmbg',
   upload: 'upload', up: 'upload', 'رفع': 'upload', 'رابط': 'upload',
   ai: 'ai', gemini: 'ai', 'ذكاء': 'ai', 'اسأل': 'ai',
-  help: 'help', menu: 'help', 'اوامر': 'help', 'الاوامر': 'help', 'أوامر': 'help',
+  help: 'help', start: 'help', menu: 'help', 'اوامر': 'help', 'الاوامر': 'help', 'أوامر': 'help',
 };
 
 function parseCommand(text) {
@@ -182,6 +182,12 @@ async function runCommand(sock, msg, cmd) {
   }
 }
 
+// ------------------------------------------------------------ الترحيب (مرة واحدة لكل شخص، يُحفظ في welcomed.json)
+const WELCOME_FILE = path.join(__dirname, 'welcomed.json');
+let welcomed = new Set();
+try { welcomed = new Set(JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8'))); } catch { /* أول تشغيل */ }
+const saveWelcomed = () => { try { fs.writeFileSync(WELCOME_FILE, JSON.stringify([...welcomed])); } catch { /* ignore */ } };
+
 // ------------------------------------------------------------ البوت
 const busy = new Set();
 
@@ -193,6 +199,14 @@ async function handleMessage(sock, msg) {
 
   // أوامر الصور والذكاء الاصطناعي
   const cmd = parseCommand(text);
+
+  // أول رسالة من شخص جديد في الخاص: نرسل له قائمة الأوامر مرة واحدة
+  if (!jid.endsWith('@g.us') && !msg.key.fromMe && !welcomed.has(jid)) {
+    welcomed.add(jid);
+    saveWelcomed();
+    if (cmd?.name !== 'help') await sock.sendMessage(jid, { text: `👋 أهلاً فيك!\n\n${HELP}` }).catch(() => {});
+  }
+
   if (cmd) {
     const who = (msg.key.participant || jid) + ':cmd';
     if (busy.has(who)) return;
