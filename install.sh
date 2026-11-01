@@ -11,8 +11,9 @@ npm install
 
 if [ ! -f .env ]; then
   read -rp "🔑 مفتاح loader.to (اختياري، Enter للتخطي): " KEY
-  printf "LOADER_API_KEY=%s
-" "$KEY" > .env
+  read -rp "🔑 مفتاح remove.bg (Enter للتخطي): " RBG
+  read -rp "🔑 مفتاح Gemini (Enter للتخطي): " GEM
+  printf "LOADER_API_KEY=%s\nREMOVEBG_API_KEY=%s\nGEMINI_API_KEY=%s\n" "$KEY" "$RBG" "$GEM" > .env
 fi
 
 # اختصار: اكتب bot لتشغيل البوت

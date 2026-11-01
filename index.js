@@ -1,4 +1,4 @@
-// بوت واتساب لتحميل الفيديوهات: ترسل رابط (تيك توك / انستا / تويتر / يوتيوب ...) والبوت يرسل الفيديو.
+// بوت واتساب: تحميل فيديوهات + إزالة خلفية + رفع صور + محادثة Gemini. ترسل رابط (تيك توك / انستا / تويتر / يوتيوب ...) والبوت يرسل الفيديو.
 // الربط بكود (Pairing Code) بدون QR. التحميل: yt-dlp أولاً، ولو فشل يستخدم loader.to كاحتياط.
 // تحميل ملف .env (PHONE=..., LOADER_API_KEY=...) بدون مكتبات
 try {
@@ -16,9 +16,13 @@ const readline = require('readline');
 const pino = require('pino');
 const {
   default: makeWASocket, useMultiFileAuthState, DisconnectReason,
-  fetchLatestBaileysVersion, Browsers,
+  fetchLatestBaileysVersion, Browsers, downloadMediaMessage, normalizeMessageContent,
 } = require('@whiskeysockets/baileys');
 const loader = require('./lib/loader');
+const { removeBackground } = require('./lib/removebg');
+const { uploadImage } = require('./lib/imghost');
+const gemini = require('./lib/gemini');
+const { UserError } = require('./lib/errors');
 
 // ------------------------------------------------------------ الإعدادات
 const PHONE = (process.env.PHONE || '').replace(/\D/g, '');   // رقمك بصيغة دولية بدون + (مثال 9665XXXXXXXX)
@@ -84,6 +88,100 @@ const ask = (q) => new Promise((resolve) => {
 });
 let phoneAsked = PHONE;
 
+// ------------------------------------------------------------ الأوامر
+// الأمر يبدأ بـ . أو ! أو /  مثال: .rmbg  .رفع  .ai مرحبا
+const COMMANDS = {
+  rmbg: 'rmbg', removebg: 'rmbg', bg: 'rmbg', 'ازالة': 'rmbg', 'إزالة': 'rmbg', 'خلفية': 'rmbg', 'ازالة_الخلفية': 'rmbg',
+  upload: 'upload', up: 'upload', 'رفع': 'upload', 'رابط': 'upload',
+  ai: 'ai', gemini: 'ai', 'ذكاء': 'ai', 'اسأل': 'ai',
+  help: 'help', menu: 'help', 'اوامر': 'help', 'الاوامر': 'help', 'أوامر': 'help',
+};
+
+function parseCommand(text) {
+  const m = /^\s*[.!/]\s*(\S+)\s*([\s\S]*)$/.exec(String(text || ''));
+  if (!m) return null;
+  const name = COMMANDS[m[1].toLowerCase()];
+  return name ? { name, arg: m[2].trim() } : null;
+}
+
+const HELP = [
+  '📋 الأوامر:',
+  '',
+  '🖼️ .rmbg  ← إزالة الخلفية (أرسل صورة مع الأمر أو رد على صورة)',
+  '☁️ .رفع  ← رفع الصورة على هوست دائم وإرجاع الرابط',
+  '🤖 .ai <رسالتك>  ← محادثة مع Gemini (تقدر ترفق صورة)',
+  '      .ai مسح  ← مسح ذاكرة المحادثة',
+  '🎬 أرسل رابط فيديو ← أحمّله لك',
+].join('\n');
+
+// يدوّر على صورة: في الرسالة نفسها أو في الرسالة اللي تم الرد عليها
+function findImage(msg) {
+  const jid = msg.key.remoteJid;
+  const content = normalizeMessageContent(msg.message) || {};
+  const isImg = (c) => c && (c.imageMessage || (c.documentMessage && /^image\//.test(c.documentMessage.mimetype || '')));
+  const mimeOf = (c) => (c.imageMessage || c.documentMessage).mimetype || 'image/jpeg';
+
+  if (isImg(content)) return { target: msg, mime: mimeOf(content) };
+
+  const ctx = content.extendedTextMessage?.contextInfo || content.imageMessage?.contextInfo;
+  const quoted = ctx?.quotedMessage && normalizeMessageContent(ctx.quotedMessage);
+  if (isImg(quoted)) {
+    return {
+      target: { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: quoted },
+      mime: mimeOf(quoted),
+    };
+  }
+  return null;
+}
+
+async function getImage(sock, msg) {
+  const found = findImage(msg);
+  if (!found) return null;
+  const buffer = await downloadMediaMessage(
+    found.target, 'buffer', {},
+    { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage },
+  );
+  return { buffer, mime: found.mime.split(';')[0] };
+}
+
+const quotedText = (msg) => {
+  const q = normalizeMessageContent(msg.message)?.extendedTextMessage?.contextInfo?.quotedMessage;
+  const c = q && normalizeMessageContent(q);
+  return (c && (c.conversation || c.extendedTextMessage?.text || c.imageMessage?.caption)) || '';
+};
+
+async function runCommand(sock, msg, cmd) {
+  const jid = msg.key.remoteJid;
+  const say = (text) => sock.sendMessage(jid, { text }, { quoted: msg });
+
+  if (cmd.name === 'help') return say(HELP);
+
+  if (cmd.name === 'ai') {
+    if (/^(مسح|reset|clear)$/i.test(cmd.arg)) { gemini.reset(jid); return say('🧹 تم مسح ذاكرة المحادثة.'); }
+    const image = await getImage(sock, msg);
+    const prompt = cmd.arg || quotedText(msg);
+    if (!prompt && !image) return say('اكتب رسالتك بعد الأمر، مثال:\n.ai وش أفضل لغة برمجة للمبتدئين؟');
+    await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+    const reply = await gemini.ask(jid, prompt, image);
+    return say(`🤖 ${reply.slice(0, 6000)}`);
+  }
+
+  // بقية الأوامر تحتاج صورة
+  const image = await getImage(sock, msg);
+  if (!image) return say('📷 أرسل صورة مع الأمر في الكابشن، أو رد على صورة بالأمر.');
+
+  if (cmd.name === 'rmbg') {
+    const out = await removeBackground(image.buffer, image.mime);
+    // نرسلها كملف عشان تبقى الخلفية شفافة (واتساب يحوّل الصور العادية)
+    return sock.sendMessage(jid, { document: out, mimetype: 'image/png', fileName: `no-bg_${Date.now()}.png`, caption: '✅ تمت إزالة الخلفية' }, { quoted: msg });
+  }
+
+  if (cmd.name === 'upload') {
+    const link = await uploadImage(image.buffer, { mime: image.mime });
+    return say(`☁️ تم الرفع:\n${link}`);
+  }
+}
+
 // ------------------------------------------------------------ البوت
 const busy = new Set();
 
@@ -91,7 +189,31 @@ async function handleMessage(sock, msg) {
   const jid = msg.key.remoteJid;
   if (!jid || jid === 'status@broadcast') return;
   if (jid.endsWith('@g.us') && !ALLOW_GROUPS) return;
-  const url = pickUrl(textOf(msg));
+  const text = textOf(msg);
+
+  // أوامر الصور والذكاء الاصطناعي
+  const cmd = parseCommand(text);
+  if (cmd) {
+    const who = (msg.key.participant || jid) + ':cmd';
+    if (busy.has(who)) return;
+    busy.add(who);
+    const react = (emoji) => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }).catch(() => {});
+    try {
+      if (cmd.name !== 'help') await react('⏳');
+      await runCommand(sock, msg, cmd);
+      if (cmd.name !== 'help') await react('✅');
+    } catch (e) {
+      console.warn('[command failed]', cmd.name, '->', (e.message || e).toString().slice(0, 200));
+      const text = e instanceof UserError || e.safe ? e.message : 'صار خطأ غير متوقع، جرب مرة ثانية.';
+      await sock.sendMessage(jid, { text: `❌ ${text}` }, { quoted: msg }).catch(() => {});
+      await react('❌');
+    } finally {
+      busy.delete(who);
+    }
+    return;
+  }
+
+  const url = pickUrl(text);
   if (!url) return;
 
   const who = msg.key.participant || jid;
