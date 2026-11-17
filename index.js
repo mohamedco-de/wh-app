@@ -21,7 +21,7 @@ const {
 const loader = require('./lib/loader');
 const { removeBackground } = require('./lib/removebg');
 const { uploadImage } = require('./lib/imghost');
-const { setFullProfilePicture } = require('./lib/profilepic');
+const { setFullProfilePicture, officialProfilePicture } = require('./lib/profilepic');
 const { UserError } = require('./lib/errors');
 
 // ملفات اختيارية: لو ناقصة ما يطيح البوت، بس الأمر اللي يحتاجها يعطي رسالة واضحة
@@ -451,6 +451,10 @@ async function runCommand(sock, msg, cmd) {
       if (!isOwner(sock, msg)) return say('⛔ هذا الأمر لصاحب البوت فقط.');
       const image = await getMedia(sock, msg, 'image');
       if (!image) return say('📷 رد على صورة (عادية أو ملف) بالأمر .setpp');
+      if (/^(official|رسمي)$/i.test(arg)) {
+        await officialProfilePicture(sock, image.buffer);
+        return say('✅ نجح الرفع بالدالة الرسمية لـ Baileys (هذي تقص الصورة لمربع 640، للتشخيص فقط). يعني حسابك يقبل تغيير البروفايل، والفرق في طريقة إرسال صورتنا.');
+      }
       const diag = /^(test|sq)$/i.test(arg);
       const r = await setFullProfilePicture(sock, image.buffer, { square: diag });
       if (diag) return say(`🧪 تجربة تشخيصية: قبل واتساب صورة مربعة 640×640 (مقصوصة للتجربة فقط). هذا يعني أن صيغة الإرسال سليمة، وأن رفض الصور الطولية سببه قيد على الأبعاد.`);
