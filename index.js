@@ -463,7 +463,8 @@ async function runCommand(sock, msg, cmd) {
       if (r.preserved === true) note = `✅ تأكدت من سيرفر واتساب: الصورة محفوظة بنفس النسبة (${dims(r.server)}).`;
       else if (r.preserved === false) note = `⚠️ واتساب غيّر أبعاد الصورة بعد الرفع (المحفوظ ${dims(r.server)}) — يعني السيرفر فرض قصاً/تحجيماً.`;
       else note = 'ℹ️ تم الرفع، لكن ما قدرت أتحقق من الأبعاد المحفوظة عند واتساب.';
-      return say(`🖼️ تم رفع الصورة بدون قص (${dims(r.sent)}).\n${note}`);
+      if (r.padded) return say(`🖼️ تم رفع الصورة كاملة بدون قص، لكن مع هوامش (${dims(r.sent)}) لأن واتساب رفض نسبتها الأصلية (قبل نسبة أقصاها ~1:${r.padded}).\n${note}\n(تعطيل الهوامش: SETPP_PAD=0 في .env)`);
+      return say(`🖼️ تم رفع الصورة بنسبتها الأصلية بدون قص ولا هوامش (${dims(r.sent)}).\n${note}`);
     }
     case 'upload': {
       const image = await getMedia(sock, msg, 'image');
