@@ -329,7 +329,9 @@ async function runCommand(sock, msg, cmd) {
       if (!isOwner(sock, msg)) return say('⛔ هذا الأمر لصاحب البوت فقط.');
       const image = await getMedia(sock, msg, 'image');
       if (!image) return say('📷 رد على صورة (عادية أو ملف) بالأمر .setpp');
-      const r = await setFullProfilePicture(sock, image.buffer);
+      const diag = /^(test|sq)$/i.test(arg);
+      const r = await setFullProfilePicture(sock, image.buffer, { square: diag });
+      if (diag) return say(`🧪 تجربة تشخيصية: قبل واتساب صورة مربعة 640×640 (مقصوصة للتجربة فقط). هذا يعني أن صيغة الإرسال سليمة، وأن رفض الصور الطولية سببه قيد على الأبعاد.`);
       const dims = (d) => `${d.width}×${d.height}`;
       let note;
       if (r.preserved === true) note = `✅ تأكدت من سيرفر واتساب: الصورة محفوظة بنفس النسبة (${dims(r.server)}).`;
