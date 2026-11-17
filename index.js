@@ -291,7 +291,10 @@ function helpText() {
 // ---- البحث عن وسائط: في الرسالة نفسها أو في الرسالة اللي تم الرد عليها
 const KINDS = {
   image: (c) => c.imageMessage?.mimetype
-    || (/^image\//.test(c.documentMessage?.mimetype || '') ? c.documentMessage.mimetype : null),
+    || (/^image\//.test(c.documentMessage?.mimetype || '') ? c.documentMessage.mimetype : null)
+    // ملف مرفق باسم صورة لكن mimetype عام (application/octet-stream)
+    || (/\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif|avif)$/i.test(c.documentMessage?.fileName || '')
+      ? `image/${(c.documentMessage.fileName.split('.').pop() || 'jpeg').toLowerCase().replace('jpg', 'jpeg')}` : null),
   video: (c) => c.videoMessage?.mimetype
     || (/^video\//.test(c.documentMessage?.mimetype || '') ? c.documentMessage.mimetype : null),
   sticker: (c) => c.stickerMessage?.mimetype || null,
