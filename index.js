@@ -22,9 +22,18 @@ const loader = require('./lib/loader');
 const { removeBackground } = require('./lib/removebg');
 const { uploadImage } = require('./lib/imghost');
 const { setFullProfilePicture } = require('./lib/profilepic');
-const media = require('./lib/media');
-const tools = require('./lib/tools');
 const { UserError } = require('./lib/errors');
+
+// ملفات اختيارية: لو ناقصة ما يطيح البوت، بس الأمر اللي يحتاجها يعطي رسالة واضحة
+function optional(name) {
+  try { return require(name); } catch (e) {
+    if (e.code !== 'MODULE_NOT_FOUND' || !String(e.message).includes(name.replace('./', ''))) throw e;
+    console.warn(`[تنبيه] الملف ${name}.js غير موجود، الأوامر المرتبطة فيه معطّلة.`);
+    return new Proxy({}, { get: () => () => { throw new UserError('هذي الميزة غير متاحة حالياً (ملف ناقص في lib).'); } });
+  }
+}
+const media = optional('./lib/media');
+const tools = optional('./lib/tools');
 
 // ------------------------------------------------------------ الإعدادات
 const PHONE = (process.env.PHONE || '').replace(/\D/g, '');   // رقمك بصيغة دولية بدون + (مثال 9665XXXXXXXX)
@@ -131,6 +140,92 @@ def('help', ['help', 'start', 'menu', 'اوامر', 'الاوامر', 'أوام�
 // أوامر سريعة ما تحتاج تفاعل ⏳ / ✅
 const QUICK = new Set(['help', 'dice', 'coin', 'pick', 'ping', 'calc', 'ball', 'percent', 'rev', 'remind', 'search']);
 
+// ------------------------------------------------------------ نظام الإضافات (lib)
+// أي ملف .js تحطه داخل lib يتحلل تلقائياً: لو يصدّر أمر (name + run) يتسجّل ويشتغل فوراً،
+// ولو ملف مساعد عادي (بدون أمر) يتجاهله. التعديل أو الحذف أو الإضافة تنعكس بدون إعادة تشغيل.
+// شكل الأمر: راجع lib/_example.js
+const LIB_DIR = path.join(__dirname, 'lib');
+const PLUGIN_CMDS = new Map();   // key -> أمر
+const PLUGIN_FILES = new Map();  // مسار الملف -> [keys]
+
+function listLibFiles(dir = LIB_DIR) {
+  const out = [];
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (ent.name.startsWith('_') || ent.name.startsWith('.')) continue;   // _example.js وغيره يتجاهل
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) out.push(...listLibFiles(full));
+    else if (ent.name.endsWith('.js')) out.push(full);
+  }
+  return out;
+}
+
+// يستخرج الأوامر من ما يصدّره الملف
+function extractCommands(mod) {
+  if (!mod || typeof mod !== 'object' && typeof mod !== 'function') return [];
+  const raw = mod.commands || mod.command || (mod.name && mod.run ? mod : null);
+  return [].concat(raw || []).filter((c) => c && typeof c.name === 'string' && typeof c.run === 'function');
+}
+
+function unregisterFile(file) {
+  for (const key of PLUGIN_FILES.get(file) || []) {
+    PLUGIN_CMDS.delete(key);
+    QUICK.delete(key);
+    for (const [alias, k] of Object.entries(COMMANDS)) if (k === key) delete COMMANDS[alias];
+  }
+  PLUGIN_FILES.delete(file);
+}
+
+function loadPluginFile(file) {
+  const rel = path.relative(__dirname, file);
+  let cmds;
+  try {
+    delete require.cache[require.resolve(file)];
+    cmds = extractCommands(require(file));
+  } catch (e) {
+    console.error(`[lib] ❌ خطأ في ${rel}: ${e.message}${PLUGIN_FILES.has(file) ? ' (أبقيت النسخة القديمة شغالة)' : ''}`);
+    return false;
+  }
+  unregisterFile(file);               // نشيل القديم بعد ما نتأكد إن الجديد سليم
+  if (!cmds.length) return true;      // ملف مساعد عادي
+  const keys = [];
+  for (const c of cmds) {
+    const key = `plugin:${c.name}`;
+    const aliases = [...new Set([c.name, ...(c.aliases || [])].map((a) => String(a).toLowerCase()))];
+    for (const a of aliases) {
+      if (COMMANDS[a] && !String(COMMANDS[a]).startsWith(`plugin:`)) console.warn(`[lib] ${rel}: الأمر .${a} يستبدل الأمر الأساسي`);
+      else if (COMMANDS[a] && COMMANDS[a] !== key) console.warn(`[lib] ${rel}: الأمر .${a} مكرر مع إضافة ثانية، الأحدث يفوز`);
+      COMMANDS[a] = key;
+    }
+    PLUGIN_CMDS.set(key, { ...c, aliases });
+    if (c.quick) QUICK.add(key);
+    keys.push(key);
+  }
+  PLUGIN_FILES.set(file, keys);
+  console.log(`[lib] ✅ ${rel}: ${cmds.map((c) => '.' + c.name).join(' ')}`);
+  return true;
+}
+
+function syncLib() {
+  let files = [];
+  try { files = listLibFiles(); } catch (e) { return console.error('[lib]', e.message); }
+  for (const f of [...PLUGIN_FILES.keys()]) if (!files.includes(f)) { unregisterFile(f); console.log(`[lib] 🗑️ انحذف ${path.relative(__dirname, f)}`); }
+  // نمسح الكاش لكل ملفات lib عشان لو عدّلت ملف مساعد تنعكس التغييرات في الأوامر اللي تستخدمه
+  for (const k of Object.keys(require.cache)) if (k.startsWith(LIB_DIR + path.sep)) delete require.cache[k];
+  for (const f of files) loadPluginFile(f);
+}
+
+let libWatching = false;
+function watchLib() {
+  if (libWatching) return;
+  libWatching = true;
+  syncLib();
+  let timer = null;
+  const onChange = () => { clearTimeout(timer); timer = setTimeout(syncLib, 400); };
+  try { fs.watch(LIB_DIR, { recursive: true }, onChange); } catch {
+    try { fs.watch(LIB_DIR, onChange); } catch (e) { console.warn('[lib] ما قدرت أراقب المجلد، أعد تشغيل البوت بعد كل تعديل:', e.message); }
+  }
+}
+
 function parseCommand(text) {
   const m = /^\s*[.!/]\s*(\S+)\s*([\s\S]*)$/.exec(String(text || ''));
   if (!m) return null;
@@ -138,7 +233,7 @@ function parseCommand(text) {
   return name ? { name, arg: m[2].trim() } : null;
 }
 
-const HELP = [
+const BASE_HELP = [
   '🤖 *قائمة الأوامر*',
   '',
   '🖼️ *الصور*',
@@ -182,6 +277,16 @@ const HELP = [
   '',
   '🎬 أرسل رابط فيديو بدون أي أمر وأحمّله لك',
 ].join('\n');
+
+// قائمة الأوامر = الأساسية + أوامر الملفات اللي في lib (تُضاف تلقائياً)
+function helpText() {
+  const extra = [];
+  for (const c of PLUGIN_CMDS.values()) {
+    if (c.hidden) continue;
+    extra.push(`▫️ \`.${c.aliases[0]}\` — ${c.help || c.name}`);
+  }
+  return extra.length ? `${BASE_HELP}\n\n🧩 *أوامر إضافية*\n${extra.join('\n')}` : BASE_HELP;
+}
 
 // ---- البحث عن وسائط: في الرسالة نفسها أو في الرسالة اللي تم الرد عليها
 const KINDS = {
@@ -287,8 +392,22 @@ async function runCommand(sock, msg, cmd) {
   const arg = cmd.arg;
   const needImage = () => say('📷 أرسل صورة مع الأمر في الكابشن، أو رد على صورة بالأمر.');
 
+  const plugin = PLUGIN_CMDS.get(cmd.name);
+  if (plugin) {
+    if (plugin.ownerOnly && !isOwner(sock, msg)) return say('⛔ هذا الأمر لصاحب البوت فقط.');
+    return plugin.run({
+      sock, msg, jid, arg, say, needImage,
+      react: (emoji) => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }).catch(() => {}),
+      getMedia: (kind = 'image') => getMedia(sock, msg, kind),
+      quotedText: () => quotedText(msg),
+      isOwner: () => isOwner(sock, msg),
+      pickUrl, UserError, fmtUptime,
+      config: { YTDLP, MAX_MB, MAX_SECONDS },
+    });
+  }
+
   switch (cmd.name) {
-    case 'help': return say(HELP);
+    case 'help': return say(helpText());
 
     case 'ping': {
       const ms = Math.max(0, Date.now() - Number(msg.messageTimestamp || 0) * 1000);
@@ -456,7 +575,7 @@ async function handleMessage(sock, msg) {
   if (!jid.endsWith('@g.us') && !msg.key.fromMe && !welcomed.has(jid)) {
     welcomed.add(jid);
     saveWelcomed();
-    if (cmd?.name !== 'help') await sock.sendMessage(jid, { text: `👋 أهلاً فيك!\n\n${HELP}` }).catch(() => {});
+    if (cmd?.name !== 'help') await sock.sendMessage(jid, { text: `👋 أهلاً فيك!\n\n${helpText()}` }).catch(() => {});
   }
 
   // اختيار تطبيق من قائمة .بحث (رقم فقط)
@@ -529,6 +648,7 @@ async function handleMessage(sock, msg) {
 }
 
 async function start() {
+  watchLib();
   const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, 'auth'));
   const { version } = await fetchLatestBaileysVersion();
 
