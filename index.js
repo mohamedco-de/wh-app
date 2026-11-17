@@ -21,6 +21,7 @@ const {
 const loader = require('./lib/loader');
 const { removeBackground } = require('./lib/removebg');
 const { uploadImage } = require('./lib/imghost');
+const { setFullProfilePicture } = require('./lib/profilepic');
 const media = require('./lib/media');
 const tools = require('./lib/tools');
 const { UserError } = require('./lib/errors');
@@ -32,6 +33,11 @@ const VIDEO_LIMIT_MB = 15;                                    // فوق هذا �
 const MAX_SECONDS = Number(process.env.MAX_SECONDS) || 900;   // أطول فيديو (15 دقيقة)
 const ALLOW_GROUPS = process.env.ALLOW_GROUPS === '1';        // يشتغل في القروبات؟ (افتراضي لا)
 const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
+// أرقام المالك الإضافية (اختياري): OWNER=9665XXXXXXXX,9665YYYYYYYY
+// رسائلك من نفس الرقم المربوط بالبوت (fromMe) وأرقام PHONE تُعتبر مالكاً تلقائياً.
+const OWNER_NUMBERS = new Set(
+  [process.env.PHONE, ...(process.env.OWNER || '').split(',')].map((n) => String(n || '').replace(/\D/g, '')).filter(Boolean),
+);
 
 const SITES = /(^|\.)(tiktok\.com|instagram\.com|twitter\.com|x\.com|fixupx\.com|vxtwitter\.com|fxtwitter\.com|youtube\.com|youtu\.be|facebook\.com|fb\.watch|reddit\.com|redd\.it|snapchat\.com|threads\.net|threads\.com|pinterest\.com|pin\.it|twitch\.tv|streamable\.com|vimeo\.com)$/i;
 
@@ -119,6 +125,7 @@ def('ball', ['ball', '8ball', 'كرة']);
 def('percent', ['percent', 'نسبة']);
 def('rev', ['rev', 'عكس']);
 def('search', ['search', 'بحث', 'ابحث']);
+def('setpp', ['setpp', 'بروفايل']);
 def('help', ['help', 'start', 'menu', 'اوامر', 'الاوامر', 'أوامر']);
 
 // أوامر سريعة ما تحتاج تفاعل ⏳ / ✅
@@ -139,6 +146,7 @@ const HELP = [
   '▫️ `.رفع` — رفع الصورة وإرجاع رابط دائم',
   '▫️ `.ملصق` — تحويل صورة أو فيديو قصير إلى ملصق',
   '▫️ `.لصورة` — تحويل ملصق إلى صورة',
+  '▫️ `.setpp` — (للمالك) رد على صورة لتعيينها بروفايل بدون قص',
   '💡 أرسل الصورة مع الأمر في الكابشن، أو رد على الصورة بالأمر',
   '',
   '🎵 *الصوت*',
@@ -264,6 +272,15 @@ const reminders = new Map(); // jid -> عدد التذكيرات الشغالة
 let currentSock = null;
 const arabicToLatin = (s) => String(s).replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
 
+// هل المرسل هو مالك البوت؟ (fromMe = رسالة من نفس الحساب المربوط، أو رقمه ضمن PHONE / OWNER)
+function isOwner(sock, msg) {
+  if (msg.key.fromMe) return true;
+  const digits = (j) => String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+  const mine = new Set([...OWNER_NUMBERS, digits(sock.user?.id), digits(sock.user?.lid)].filter(Boolean));
+  const senders = [msg.key.participant, msg.key.remoteJid, msg.key.participantAlt, msg.key.remoteJidAlt].map(digits).filter(Boolean);
+  return senders.some((n) => mine.has(n));
+}
+
 async function runCommand(sock, msg, cmd) {
   const jid = msg.key.remoteJid;
   const say = (text) => sock.sendMessage(jid, { text }, { quoted: msg });
@@ -307,6 +324,18 @@ async function runCommand(sock, msg, cmd) {
       const out = await removeBackground(image.buffer, image.mime);
       // نرسلها كملف عشان تبقى الخلفية شفافة (واتساب يحوّل الصور العادية)
       return sock.sendMessage(jid, { document: out, mimetype: 'image/png', fileName: `no-bg_${Date.now()}.png`, caption: '✅ تمت إزالة الخلفية' }, { quoted: msg });
+    }
+    case 'setpp': {
+      if (!isOwner(sock, msg)) return say('⛔ هذا الأمر لصاحب البوت فقط.');
+      const image = await getMedia(sock, msg, 'image');
+      if (!image) return say('📷 رد على صورة (عادية أو ملف) بالأمر .setpp');
+      const r = await setFullProfilePicture(sock, image.buffer);
+      const dims = (d) => `${d.width}×${d.height}`;
+      let note;
+      if (r.preserved === true) note = `✅ تأكدت من سيرفر واتساب: الصورة محفوظة بنفس النسبة (${dims(r.server)}).`;
+      else if (r.preserved === false) note = `⚠️ واتساب غيّر أبعاد الصورة بعد الرفع (المحفوظ ${dims(r.server)}) — يعني السيرفر فرض قصاً/تحجيماً.`;
+      else note = 'ℹ️ تم الرفع، لكن ما قدرت أتحقق من الأبعاد المحفوظة عند واتساب.';
+      return say(`🖼️ تم رفع الصورة بدون قص (${dims(r.sent)}).\n${note}`);
     }
     case 'upload': {
       const image = await getMedia(sock, msg, 'image');
